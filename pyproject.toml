@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "polviz"
+version = "0.1.0"
+description = "Interactive polarization visualizer: Poincaré sphere, Stokes parameters and field projection"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+    "numpy>=1.22",
+    "PySide6>=6.4",
+    "pyqtgraph>=0.13",
+    "PyOpenGL>=3.1",
+]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[project.scripts]
+polviz = "polviz.app:main"
+
+[tool.setuptools.packages.find]
+include = ["polviz*"]
+
+[tool.setuptools.package-data]
+polviz = ["assets/*"]

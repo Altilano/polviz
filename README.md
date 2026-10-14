@@ -22,11 +22,11 @@ polarization state evolve simultaneously on the **Poincaré sphere**, in the **f
 ## Installation
 
 ```bash
-git clone <your-repo-url> polviz
+git clone https://github.com/Altilano/polviz.git 
 cd polviz
-python -m venv .venv && source .venv/bin/activate   # Windows: .venv\Scripts\activate
-pip install -e ".[dev]"
-polviz            # or: python -m polviz
+python -m venv .venv && source .venv\Scripts\activate   # Linux:  .venv/bin/activate
+pip install numpy PySide6 pyqtgraph PyOpenGL pytest   
+python -m polviz            # or: 
 ```
 
 Run the tests with `pytest`.

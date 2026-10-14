@@ -69,10 +69,22 @@ class LightSource(Parametrized):
 # ---------------------------------------------------------------------------
 class OpticalElement(Parametrized):
     kind = "Element"
+    # Optional trajectories that can be toggled: (key, label, shown by default)
+    path_options: tuple[tuple[str, str, bool], ...] = ()
 
     def __init__(self, name: str | None = None, **values):
         super().__init__(name, **values)
         self.enabled = True
+        self.show_paths = {key: default for key, _, default in self.path_options}
+
+    def trajectories(self, S_in, samples: int = 60) -> list[tuple[str, np.ndarray]]:
+        """Curves to draw on the Poincare sphere for this element: [(style, stokes_array)].
+
+        style is "solid" or "dashed".  The default is one solid curve following
+        mueller_partial(t) for t from 0 to 1.
+        """
+        ts = np.linspace(0.0, 1.0, samples + 1)
+        return [("solid", np.array([self.mueller_partial(t) @ S_in for t in ts]))]
 
     def mueller(self) -> np.ndarray:
         raise NotImplementedError
@@ -124,6 +136,22 @@ class Waveplate(OpticalElement):
 
     def mueller_partial(self, t):
         return ph.linear_retarder(np.radians(self["angle"]), 2 * np.pi * self["retardance"] * t)
+
+    path_options = (
+        ("retardance", "Retardance path: θ fixed, Γ from 0 to set value (solid)", True),
+        ("angle", "Angle path: Γ fixed, θ from 0° to set value (dashed)", False),
+    )
+
+    def trajectories(self, S_in, samples=60):
+        ts = np.linspace(0.0, 1.0, samples + 1)
+        theta = np.radians(self["angle"])
+        delta = 2 * np.pi * self["retardance"]
+        out = []
+        if self.show_paths["retardance"]:
+            out.append(("solid", np.array([ph.linear_retarder(theta, delta * t) @ S_in for t in ts])))
+        if self.show_paths["angle"]:
+            out.append(("dashed", np.array([ph.linear_retarder(theta * t, delta) @ S_in for t in ts])))
+        return out
 
     def axis(self):
         return self["angle"], "fast axis"
@@ -180,6 +208,9 @@ class Mirror(OpticalElement):
         return f"AOI = {self['aoi']:.1f}°, N = {self['n']:.2f} + {self['k']:.2f}i"
 
 
+# Class name -> class, used when loading saved setups.
+ELEMENT_TYPES = {cls.__name__: cls for cls in (Polarizer, Waveplate, Rotator, Depolarizer, Mirror)}
+
 # Menu entries -> factory.  Defaults for the mirror approximate silver at 633 nm.
 ELEMENT_FACTORIES = {
     "Linear polarizer": lambda: Polarizer(),
@@ -212,14 +243,15 @@ class OpticalSystem:
             out.append(S)
         return out
 
-    def paths(self, samples: int = 60) -> list[np.ndarray]:
-        """For each element, Stokes vectors tracing its action continuously (shape (samples+1, 4))."""
+    def trajectories(self, samples: int = 60) -> list[list[tuple[str, np.ndarray]]]:
+        """For each element, the list of (style, Stokes array) curves to draw on the sphere."""
         states = self.states()
-        result = []
-        for S_in, el in zip(states[:-1], self.elements):
-            if not el.enabled:
-                result.append(np.array([S_in]))
-                continue
-            ts = np.linspace(0.0, 1.0, samples + 1)
-            result.append(np.array([el.mueller_partial(t) @ S_in for t in ts]))
-        return result
+        return [el.trajectories(S_in, samples) if el.enabled else []
+                for S_in, el in zip(states[:-1], self.elements)]
+
+
+def default_system() -> OpticalSystem:
+    """The setup shown at start-up and after File > New."""
+    system = OpticalSystem()
+    system.elements = [Waveplate("λ/4 plate", angle=45, retardance=0.25)]
+    return system

@@ -96,4 +96,5 @@ def test_system_chain_and_disable():
     assert np.isclose(states[2][0], 0.5)
     sys_.elements[1].enabled = False
     assert np.allclose(sys_.states()[2], states[1])
-    assert len(sys_.paths()) == 2
+    assert len(sys_.trajectories()) == 2
+    assert sys_.trajectories()[1] == []   # disabled element draws nothing

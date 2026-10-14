@@ -1,6 +1,8 @@
 """The three visualizations: Poincare sphere, field projection (ellipse) and Stokes bar chart."""
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 import pyqtgraph as pg
 import pyqtgraph.opengl as gl
@@ -26,6 +28,22 @@ def _normalized(S, eps=1e-9):
     return None if S[0] <= eps else np.asarray(S[1:4]) / S[0]
 
 
+def _dash_segments(pts, dash=0.07, gap=0.05):
+    """Turn a polyline into segment pairs (for GL 'lines' mode) forming a dashed line.
+
+    The curve is resampled uniformly by arc length so dashes have equal length.
+    """
+    seg = np.linalg.norm(np.diff(pts, axis=0), axis=1)
+    s = np.concatenate([[0.0], np.cumsum(seg)])
+    if s[-1] < 1e-9:
+        return np.empty((0, 3))
+    u = np.linspace(0, s[-1], max(int(s[-1] / 0.005), 2))
+    res = np.column_stack([np.interp(u, s, pts[:, k]) for k in range(3)])
+    on = (u[:-1] % (dash + gap)) < dash
+    pairs = np.stack([res[:-1][on], res[1:][on]], axis=1)
+    return pairs.reshape(-1, 3)
+
+
 # ---------------------------------------------------------------------------
 # Poincare sphere
 # ---------------------------------------------------------------------------
@@ -35,12 +53,18 @@ class PoincareView(gl.GLViewWidget):
         self.setBackgroundColor((18, 20, 26))
         self.reset_camera()
         self._build_static()
-        self._lines: list[gl.GLLinePlotItem] = []
+        self._lines: list[gl.GLLinePlotItem] = []    # solid trajectories (reused)
+        self._dashed: list[gl.GLLinePlotItem] = []   # dashed trajectories (reused)
         self._vector = gl.GLLinePlotItem(pos=np.zeros((2, 3)), color=(1, 1, 1, 0.9), width=2,
                                          antialias=True)
         self.addItem(self._vector)
         self._points = gl.GLScatterPlotItem(pos=np.zeros((1, 3)), size=10, pxMode=True)
         self.addItem(self._points)
+
+    def export_image(self, path) -> None:
+        """Save the current 3D view (including axis labels) as an image file."""
+        if not self.grabFramebuffer().save(str(path)):
+            raise OSError(f"Could not write {path}")
 
     def reset_camera(self):
         self.setCameraPosition(distance=4.3, elevation=22, azimuth=35)
@@ -79,22 +103,36 @@ class PoincareView(gl.GLViewWidget):
             for p, text in labels[axis]:
                 self.addItem(gl.GLTextItem(pos=p, text=text, color=QtGui.QColor(*rgb), font=font))
 
-    def set_states(self, states, paths, highlight: int):
-        # Trajectories: reuse line items, hide the unused ones.
-        for i, path in enumerate(paths):
-            if i >= len(self._lines):
-                item = gl.GLLinePlotItem(width=3, antialias=True, mode="line_strip")
-                self.addItem(item)
-                self._lines.append(item)
-            pts = np.array([p for p in (_normalized(S) for S in path) if p is not None])
-            item = self._lines[i]
-            if len(pts) >= 2:
-                item.setData(pos=pts, color=element_color(i) + (1.0,))
+    def _line_item(self, pool, index, mode):
+        """Get (creating if needed) the index-th reusable line item of a pool."""
+        while len(pool) <= index:
+            item = gl.GLLinePlotItem(width=3, antialias=True, mode=mode)
+            self.addItem(item)
+            pool.append(item)
+        return pool[index]
+
+    def set_states(self, states, trajectories, highlight: int):
+        """states: Stokes vectors; trajectories: per element, a list of (style, Stokes array)."""
+        used = {"solid": 0, "dashed": 0}
+        for i, curves in enumerate(trajectories):
+            color = element_color(i) + (1.0,)
+            for style, path in curves:
+                pts = np.array([p for p in (_normalized(S) for S in path) if p is not None])
+                if len(pts) < 2:
+                    continue
+                if style == "dashed":
+                    pts = _dash_segments(pts)
+                    if len(pts) < 2:
+                        continue
+                    item = self._line_item(self._dashed, used["dashed"], "lines")
+                else:
+                    item = self._line_item(self._lines, used["solid"], "line_strip")
+                used[style] += 1
+                item.setData(pos=pts, color=color)
                 item.setVisible(True)
-            else:
+        for pool, n in ((self._lines, used["solid"]), (self._dashed, used["dashed"])):
+            for item in pool[n:]:
                 item.setVisible(False)
-        for item in self._lines[len(paths):]:
-            item.setVisible(False)
 
         # State markers.
         pos, colors, sizes = [], [], []
@@ -224,3 +262,34 @@ class StokesView(pg.PlotWidget):
         for i, (label, v) in enumerate(zip(self._labels, h)):
             label.setText(f"{v:+.3f}")
             label.setPos(i, max(v, 0) + 0.02)
+
+
+# ---------------------------------------------------------------------------
+# Export of the 2D plots
+# ---------------------------------------------------------------------------
+def export_plot(plot: pg.PlotWidget, path, scale: float = 2.0) -> None:
+    """Save a pyqtgraph plot as SVG (vector) or as a raster image (PNG, JPG, ...).
+
+    SVG uses Qt's own SVG generator: pyqtgraph's SVGExporter fails with recent Qt 6 releases.
+    """
+    path = str(path)
+    if path.lower().endswith(".svg"):
+        from PySide6 import QtSvg
+
+        generator = QtSvg.QSvgGenerator()
+        generator.setFileName(path)
+        generator.setSize(plot.size())
+        generator.setViewBox(plot.rect())
+        generator.setTitle(plot.plotItem.titleLabel.text or "PolViz plot")
+        generator.setDescription("Exported from PolViz")
+        painter = QtGui.QPainter(generator)
+        plot.render(painter)
+        painter.end()
+    else:
+        import pyqtgraph.exporters as exporters
+
+        exporter = exporters.ImageExporter(plot.plotItem)
+        exporter.parameters()["width"] = int(plot.width() * scale)
+        exporter.export(path)
+        if not Path(path).exists():
+            raise OSError(f"Could not write {path}")

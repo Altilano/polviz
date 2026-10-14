@@ -1,0 +1,45 @@
+{
+  "format": "polviz-setup",
+  "version": 1,
+  "source": {
+    "azimuth": 30.0,
+    "ellipticity": 0.0,
+    "dop": 1
+  },
+  "elements": [
+    {
+      "type": "Waveplate",
+      "name": "λ/2 plate",
+      "enabled": true,
+      "values": {
+        "angle": 60.0,
+        "retardance": 0.5
+      },
+      "show_paths": {
+        "retardance": true,
+        "angle": true
+      }
+    },
+    {
+      "type": "Waveplate",
+      "name": "λ/4 plate",
+      "enabled": true,
+      "values": {
+        "angle": -30.0,
+        "retardance": 0.25
+      },
+      "show_paths": {
+        "retardance": true,
+        "angle": true
+      }
+    },
+    {
+      "type": "Polarizer",
+      "name": "Linear polarizer",
+      "enabled": true,
+      "values": {
+        "angle": 20.0
+      }
+    }
+  ]
+}

@@ -1,12 +1,15 @@
 """Main application window."""
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 from PySide6 import QtCore, QtGui, QtWidgets
 
 from .. import physics as ph
-from ..elements import ELEMENT_FACTORIES, OpticalSystem, Waveplate
-from .views import EllipseView, PoincareView, StokesView, element_color
+from ..elements import ELEMENT_FACTORIES, default_system
+from ..serialization import load_setup, save_setup
+from .views import EllipseView, PoincareView, StokesView, element_color, export_plot
 from .widgets import ParamEditor
 
 SOURCE_PRESETS = {
@@ -26,15 +29,21 @@ only uses CCW/CW.</p>
 light sits inside the sphere at radius equal to its degree of polarization.
 A waveplate rotates the state by its retardance Γ about its fast-axis point,
 counter-clockwise when viewed from outside the sphere along that axis.</p>
-<p>Angles are measured from +x towards +y.</p>"""
+<p>Angles are measured from +x towards +y.</p>
+<p>Waveplate trajectories: the <b>solid</b> curve keeps the fast axis θ fixed and grows the
+retardance from 0 to Γ (the state inside the plate as light propagates). The <b>dashed</b>
+curve keeps Γ fixed and turns the fast axis from 0° to θ; it starts at the output the plate
+would give with θ = 0° and ends at the actual output.</p>"""
+
+SETUP_FILTER = "PolViz setup (*.json);;All files (*)"
 
 
 class MainWindow(QtWidgets.QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("PolViz — polarization visualizer")
-        self.system = OpticalSystem()
-        self.system.elements = [Waveplate("λ/4 plate", angle=45, retardance=0.25)]
+        self.system = default_system()
+        self.current_path: Path | None = None
+        self.dirty = False
         self.obs_index = len(self.system.elements)  # which state the 2D views show
         self._editor = None
 
@@ -52,18 +61,36 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self._rebuild_chain(select=0)
         self.refresh()
+        self._update_title()
 
     # ------------------------------------------------------------------ layout
     def _build_menu(self):
+        def action(menu, text, slot, shortcut=None):
+            act = menu.addAction(text)
+            if shortcut is not None:
+                act.setShortcut(shortcut)
+            act.triggered.connect(slot)
+            return act
+
         file_menu = self.menuBar().addMenu("&File")
-        quit_action = file_menu.addAction("&Quit")
-        quit_action.setShortcut(QtGui.QKeySequence.Quit)
-        quit_action.triggered.connect(self.close)
+        action(file_menu, "&New", self.new_setup, QtGui.QKeySequence.New)
+        action(file_menu, "&Open…", self.open_setup, QtGui.QKeySequence.Open)
+        action(file_menu, "&Save", self.save, QtGui.QKeySequence.Save)
+        action(file_menu, "Save &As…", self.save_as, QtGui.QKeySequence.SaveAs)
+        file_menu.addSeparator()
+        export_menu = file_menu.addMenu("&Export figure")
+        action(export_menu, "Poincaré sphere…", lambda: self.export_figure("sphere"))
+        action(export_menu, "Field projection…", lambda: self.export_figure("ellipse"))
+        action(export_menu, "Stokes parameters…", lambda: self.export_figure("stokes"))
+        action(export_menu, "Whole window…", lambda: self.export_figure("window"))
+        file_menu.addSeparator()
+        action(file_menu, "&Quit", self.close, QtGui.QKeySequence.Quit)
+
         view_menu = self.menuBar().addMenu("&View")
-        view_menu.addAction("Reset sphere camera").triggered.connect(self.poincare.reset_camera)
+        action(view_menu, "Reset sphere camera", self.poincare.reset_camera)
         help_menu = self.menuBar().addMenu("&Help")
-        help_menu.addAction("Conventions…").triggered.connect(
-            lambda: QtWidgets.QMessageBox.information(self, "Conventions", CONVENTIONS))
+        action(help_menu, "Conventions…",
+               lambda: QtWidgets.QMessageBox.information(self, "Conventions", CONVENTIONS))
 
     def _build_controls(self):
         panel = QtWidgets.QWidget()
@@ -73,7 +100,7 @@ class MainWindow(QtWidgets.QMainWindow):
         src_box = QtWidgets.QGroupBox("Light source")
         src_layout = QtWidgets.QVBoxLayout(src_box)
         self.source_editor = ParamEditor(self.system.source)
-        self.source_editor.valueChanged.connect(lambda *_: self.refresh())
+        self.source_editor.valueChanged.connect(lambda *_: self._modified())
         src_layout.addWidget(self.source_editor)
         presets = QtWidgets.QHBoxLayout()
         for name, (psi, chi) in SOURCE_PRESETS.items():
@@ -186,7 +213,7 @@ class MainWindow(QtWidgets.QMainWindow):
         pos = row + 1 if row >= 0 else len(self.system.elements)
         self.system.elements.insert(pos, element)
         self._rebuild_chain(select=pos)
-        self.refresh()
+        self._modified()
 
     def _remove_element(self):
         row = self.chain_list.currentRow()
@@ -194,7 +221,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         del self.system.elements[row]
         self._rebuild_chain(select=min(row, len(self.system.elements) - 1))
-        self.refresh()
+        self._modified()
 
     def _move_element(self, step):
         row = self.chain_list.currentRow()
@@ -204,7 +231,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         els[row], els[new] = els[new], els[row]
         self._rebuild_chain(select=new)
-        self.refresh()
+        self._modified()
 
     def _on_item_changed(self, item):
         row = self.chain_list.row(item)
@@ -212,7 +239,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.chain_list.blockSignals(True)
         self._update_labels()
         self.chain_list.blockSignals(False)
-        self.refresh()
+        self._modified()
 
     def _on_select(self, row):
         if self._editor is not None:
@@ -222,8 +249,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if 0 <= row < len(self.system.elements):
             el = self.system.elements[row]
             self.editor_box.setTitle(f"Selected element: {row + 1}. {el.name}")
-            self._editor = ParamEditor(el)
-            self._editor.valueChanged.connect(self._on_element_param)
+            self._editor = self._make_element_editor(el)
             self.editor_layout.addWidget(self._editor)
             self.obs_index = row + 1
         else:
@@ -234,11 +260,32 @@ class MainWindow(QtWidgets.QMainWindow):
         self.obs_combo.blockSignals(False)
         self.refresh()
 
+    def _make_element_editor(self, el):
+        """Parameter sliders plus, for elements that have them, trajectory toggles."""
+        box = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(box)
+        layout.setContentsMargins(0, 0, 0, 0)
+        params = ParamEditor(el)
+        params.valueChanged.connect(self._on_element_param)
+        layout.addWidget(params)
+        if el.path_options:
+            layout.addWidget(QtWidgets.QLabel("Show on the Poincaré sphere:"))
+            for key, label, _ in el.path_options:
+                check = QtWidgets.QCheckBox(label)
+                check.setChecked(el.show_paths[key])
+                check.toggled.connect(lambda on, k=key, e=el: self._on_path_toggle(e, k, on))
+                layout.addWidget(check)
+        return box
+
+    def _on_path_toggle(self, element, key, on):
+        element.show_paths[key] = on
+        self._modified()
+
     def _on_element_param(self, *_):
         self.chain_list.blockSignals(True)
         self._update_labels()
         self.chain_list.blockSignals(False)
-        self.refresh()
+        self._modified()
 
     def _on_obs_changed(self, index):
         self.obs_index = max(index, 0)
@@ -248,20 +295,140 @@ class MainWindow(QtWidgets.QMainWindow):
         self.system.source.set("azimuth", psi)
         self.system.source.set("ellipticity", chi)
         self.source_editor.refresh()
+        self._modified()
+
+    # ------------------------------------------------------------------ files
+    def _modified(self):
+        if not self.dirty:
+            self.dirty = True
+            self._update_title()
         self.refresh()
+
+    def _update_title(self):
+        name = self.current_path.name if self.current_path else "Untitled"
+        self.setWindowTitle(f"{name}{' *' if self.dirty else ''} — PolViz")
+
+    def _maybe_save(self) -> bool:
+        """Ask to save unsaved changes; False means the user cancelled."""
+        if not self.dirty:
+            return True
+        answer = QtWidgets.QMessageBox.question(
+            self, "Unsaved changes", "Save the changes to the current setup?",
+            QtWidgets.QMessageBox.Save | QtWidgets.QMessageBox.Discard
+            | QtWidgets.QMessageBox.Cancel)
+        if answer == QtWidgets.QMessageBox.Save:
+            return self.save()
+        return answer == QtWidgets.QMessageBox.Discard
+
+    def _set_system(self, system, path):
+        # Keep the same source object (the source editor is bound to it).
+        self.system.source.values.update(system.source.values)
+        self.system.elements = system.elements
+        self.source_editor.refresh()
+        self.current_path = path
+        self.dirty = False
+        self._rebuild_chain(select=0 if system.elements else None)
+        self.refresh()
+        self._update_title()
+
+    def new_setup(self):
+        if self._maybe_save():
+            self._set_system(default_system(), None)
+
+    def open_setup(self):
+        if not self._maybe_save():
+            return
+        start = str(self.current_path.parent) if self.current_path else ""
+        name, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Open setup", start, SETUP_FILTER)
+        if not name:
+            return
+        try:
+            system = load_setup(name)
+        except (OSError, ValueError) as exc:
+            QtWidgets.QMessageBox.critical(self, "Could not open setup", str(exc))
+            return
+        self._set_system(system, Path(name))
+
+    def save(self) -> bool:
+        if self.current_path is None:
+            return self.save_as()
+        try:
+            save_setup(self.system, self.current_path)
+        except OSError as exc:
+            QtWidgets.QMessageBox.critical(self, "Could not save setup", str(exc))
+            return False
+        self.dirty = False
+        self._update_title()
+        return True
+
+    def save_as(self) -> bool:
+        start = str(self.current_path) if self.current_path else "setup.json"
+        name, _ = QtWidgets.QFileDialog.getSaveFileName(self, "Save setup", start, SETUP_FILTER)
+        if not name:
+            return False
+        path = Path(name)
+        if not path.suffix:
+            path = path.with_suffix(".json")
+        self.current_path = path
+        return self.save()
+
+    def export_figure(self, which: str):
+        titles = {"sphere": "Poincaré sphere", "ellipse": "Field projection",
+                  "stokes": "Stokes parameters", "window": "Whole window"}
+        vector_ok = which in ("ellipse", "stokes")
+        filters = "PNG image (*.png);;JPEG image (*.jpg)"
+        if vector_ok:
+            filters = "SVG vector image (*.svg);;" + filters
+        base = self.current_path.stem if self.current_path else "polviz"
+        default = f"{base}_{which}.{'svg' if vector_ok else 'png'}"
+        name, chosen = QtWidgets.QFileDialog.getSaveFileName(
+            self, f"Export {titles[which]}", default, filters)
+        if not name:
+            return
+        path = Path(name)
+        if not path.suffix:
+            path = path.with_suffix("." + chosen.split("*.")[1].rstrip(")"))
+        try:
+            if which == "sphere":
+                self.poincare.export_image(path)
+            elif which == "ellipse":
+                export_plot(self.ellipse, path)
+            elif which == "stokes":
+                export_plot(self.stokes, path)
+            else:
+                self.grab_window().save(str(path))
+        except Exception as exc:  # exporters can fail in many ways; report, don't crash
+            QtWidgets.QMessageBox.critical(self, "Export failed", str(exc))
+
+    def grab_window(self) -> QtGui.QPixmap:
+        """Screenshot of the window; the 3D view is pasted from its framebuffer, which
+        (unlike QWidget.grab) includes the axis labels."""
+        pixmap = self.grab()
+        sphere = self.poincare.grabFramebuffer()
+        sphere.setDevicePixelRatio(self.poincare.devicePixelRatioF())
+        painter = QtGui.QPainter(pixmap)
+        painter.drawImage(self.poincare.mapTo(self, QtCore.QPoint(0, 0)), sphere)
+        painter.end()
+        return pixmap
+
+    def closeEvent(self, event):
+        if self._maybe_save():
+            event.accept()
+        else:
+            event.ignore()
 
     # ------------------------------------------------------------------ update views
     def refresh(self):
         if not hasattr(self, "info"):
             return
         states = self.system.states()
-        paths = self.system.paths()
+        trajectories = self.system.trajectories()
         obs = int(np.clip(self.obs_index, 0, len(states) - 1))
         ref = states[0][0]
         axis = None
         if obs > 0 and self.system.elements[obs - 1].enabled:
             axis = self.system.elements[obs - 1].axis()
-        self.poincare.set_states(states, paths, obs)
+        self.poincare.set_states(states, trajectories, obs)
         self.ellipse.set_state(states[obs], ref, axis)
         self.stokes.set_state(states[obs], ref)
         self.info.setText(self._info_text(states[obs], ref))

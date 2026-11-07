@@ -108,4 +108,4 @@ Subclass `OpticalElement` in `elements.py`, declare its `params`, implement `mue
 - Wavelength dependence (dispersive waveplates) and polychromatic light
 - Animate the full beam path in 3D along z
 
-## Yes, it was "vibecoded" with Claude.
+## Made almost entirely with Claude.
